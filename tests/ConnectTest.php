@@ -21,8 +21,12 @@ namespace {
     class Registrar_Exception extends RuntimeException {
         public function __construct(string $message, ?array $params = null, int $code = 0) { parent::__construct($message, $code); }
     }
+    class TestLog {
+        public static array $errors = [];
+        public function error($message): void { self::$errors[] = $message; }
+    }
     class Registrar_AdapterAbstract {
-        public function getLog(): object { return new class { public function error($message): void {} }; }
+        public function getLog(): object { return new TestLog(); }
     }
     class Registrar_Domain_Contact {
         public function __call(string $method, array $args): string {
@@ -251,6 +255,25 @@ namespace {
         check(str_contains($e->getMessage(), 'Do not retry registration'), 'Already purchased warning');
     }
     check(count(Http::$requests) === 1, 'No retry or follow-up after contact fallback');
+    foreach ([[200, '{"reply":{"code":300}}', ''], [200, '{"reply":{"code":200,"detail":"Nameserver update denied"}}', '']] as $repairResponse) {
+        Http::$requests = [];
+        TestLog::$errors = [];
+        Http::$responses = [[200, '{"reply":{"code":301}}', ''], $repairResponse];
+        check($namesilo->registerDomain($domain), 'NameSilo 301 remains a completed purchase');
+        check(count(Http::$requests) === 2, 'One purchase and one nameserver repair');
+        check(str_ends_with(Http::$requests[0][1], '/registerDomain'), 'Purchase occurs once');
+        check(str_ends_with(Http::$requests[1][1], '/changeNameServers'), 'Safe nameserver repair');
+        check(Http::$requests[1][2]['query']['ns1'] === 'ns1.example.test', 'Requested nameservers repaired');
+        if ($repairResponse[1] !== '{"reply":{"code":300}}') {
+            check((bool) array_filter(TestLog::$errors, fn ($message) => str_contains($message, 'registered example.test but nameservers require a manual update')), 'Explicit manual action after failed repair');
+        } else {
+            check(TestLog::$errors === [], 'Successful repair needs no manual action');
+        }
+    }
+    Http::$requests = [];
+    Http::$response = [200, '{"reply":{"code":300}}', ''];
+    check($namesilo->registerDomain($domain), 'Normal NameSilo registration');
+    check(count(Http::$requests) === 1, 'Code 300 does not trigger repair');
     foreach ([
         ['registrar'=>'namesilo', 'api_key'=>'key'],
         ['registrar'=>'godaddy', 'api_key'=>'key'],
