@@ -1,10 +1,10 @@
-# FOSSBilling Registrar Connect
+# FOSSBilling DRS
 
 [![StandWithUkraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/badges/StandWithUkraine.svg)](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
 
 [![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://github.com/vshymanskyy/StandWithUkraine/blob/main/docs/README.md)
 
-A FOSSBilling registrar module for working with multiple domain registrars through one consistent API.
+FOSSBilling DRS (Domain Registration System) is a registrar module for working with multiple domain registrars through one consistent API.
 
 ## Registrar Support
 
@@ -22,7 +22,7 @@ A FOSSBilling registrar module for working with multiple domain registrars throu
 
 1. Use our **[Module Customizer Tool](https://namingo.org/foss-module/)** to generate a fine-tuned registrar module specifically for your registrar, then extract the **generated archive** into `/tmp`.
 
-2. From the extracted archive in `/tmp`, move the `namingo/` directory into your FOSSBilling/Namingo Registrar installation directory (for example `/var/www/fossbilling` or `/var/www`, depending on where it is installed). Move the main module file `Connect.php` into `[FOSSBilling_path]/library/Registrar/Adapter`.
+2. From the extracted archive in `/tmp`, move the `namingo/` directory into your FOSSBilling/Namingo Registrar installation directory (for example `/var/www/fossbilling` or `/var/www`, depending on where it is installed). Move the main module file `DRS.php` into `[FOSSBilling_path]/library/Registrar/Adapter`.
 
 If this is not your first registrar module, you may skip copying the `namingo/` directory, as it is shared between modules.
 
@@ -34,6 +34,7 @@ If this is not your first registrar module, you may skip copying the `namingo/` 
 
 ## Upgrade
 
+- For existing Connect installations, copy both `DRS.php` and the compatibility `Connect.php` into the adapter directory to keep existing registrar configurations working. New installations use `DRS.php`.
 - Before upgrading, note your current module settings.
 - Download the updated module and repeat the installation steps to replace the existing files.
 - After upgrading, verify that your module settings are still correct.
@@ -57,13 +58,13 @@ Your feedback and inquiries are invaluable to Namingo's evolutionary journey. If
 
 - **Discord**: Or chat with us on our [Discord](https://discord.gg/97R9VCrWgc) channel.
   
-- **GitHub Issues**: For bug reports or feature requests, please use the [Issues](https://github.com/getnamingo/fossbilling-registrar-connect/issues) section of our GitHub repository.
+- **GitHub Issues**: For bug reports or feature requests, please use the [Issues](https://github.com/getnamingo/fossbilling-drs/issues) section of our GitHub repository.
 
 We appreciate your involvement and patience as Namingo continues to grow and adapt.
 
 ## Support This Project
 
-If you find FOSSBilling Registrar Connect useful, consider donating:
+If you find FOSSBilling DRS useful, consider donating:
 
 - [Donate via Stripe](https://donate.stripe.com/7sI2aI4jV3Offn28ww)
 - BTC: `bc1q9jhxjlnzv0x4wzxfp8xzc6w289ewggtds54uqa`
@@ -71,4 +72,4 @@ If you find FOSSBilling Registrar Connect useful, consider donating:
 
 ## Licensing
 
-FOSSBilling Registrar Connect is licensed under the MIT License.
+FOSSBilling DRS is licensed under the MIT License.
