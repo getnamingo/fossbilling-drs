@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * FOSSBilling registrar adapter for namingo/registrars.
+ * FOSSBilling registrar adapter for namingo/cardo-drs.
  *
  *
  * SPDX-License-Identifier: MIT
@@ -15,11 +15,8 @@ if (file_exists($autoload)) {
     require_once $autoload;
 }
 
-use Namingo\Registrars\Registrar as NamingoRegistrars;
-use Namingo\Registrars\Adapter\NameCom;
-use Namingo\Registrars\Adapter\OpenSRS;
-use Namingo\Registrars\Contact as NamingoContact;
-use Namingo\Registrars\UpdateDetails as NamingoUpdateDetails;
+use Namingo\Cardo\DRS\RegistrarAPI;
+use Namingo\Cardo\DRS\Core\BaseAdapter;
 
 class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 {
@@ -37,13 +34,13 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         'password' => '',
     ];
 
-    private ?NamingoRegistrars $registrarClient = null;
+    private ?BaseAdapter $registrarClient = null;
 
     public function __construct($options)
     {
-        if (!class_exists(NamingoRegistrars::class)) {
+        if (!class_exists(RegistrarAPI::class)) {
             throw new Registrar_Exception(
-                'The Namingo Registrars Composer package is not installed. Run "composer require namingo/registrars" from the FOSSBilling installation directory.',
+                'The Cardo DRS Composer package is not installed. Run "composer require namingo/cardo-drs" from the namingo directory in the FOSSBilling installation.',
             );
         }
 
@@ -74,7 +71,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     public static function getConfig(): array
     {
         return [
-            'label' => 'Connect domains through the Namingo Registrars library. Supports OpenSRS and Name.com, with separate test and production endpoints.',
+            'label' => 'Connect domains through the Cardo DRS library. Supports OpenSRS and Name.com, with separate test and production endpoints.',
             'form' => [
                 'username' => ['text', [
                     'label' => 'Username',
@@ -111,12 +108,12 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 
     public function isDomainAvailable(Registrar_Domain $domain): bool
     {
-        $this->getLog()->debug('Checking domain availability through Connect: ' . $domain->getName());
-
-        return (bool) $this->callApi(
+        $result = $this->callApi(
             'check availability for ' . $domain->getName(),
-            fn (): bool => $this->getRegistrarClient()->available($domain->getName()),
+            fn (): array => $this->getRegistrarClient()->checkAvailability([$domain->getName()]),
         );
+
+        return in_array(strtolower($domain->getName()), $result['available'] ?? [], true);
     }
 
     public function isDomaincanBeTransferred(Registrar_Domain $domain): bool
@@ -130,47 +127,23 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 
     public function modifyNs(Registrar_Domain $domain): bool
     {
-        $client = $this->getRegistrarClient();
-
-        if (method_exists($client, 'updateNameservers')) {
-            $nameservers = $this->getNameservers($domain);
-            $result = $this->callApi(
-                'update nameservers for ' . $domain->getName(),
-                fn (): array => $client->updateNameservers($domain->getName(), $nameservers),
-            );
-
-            if (array_key_exists('successful', $result) && $result['successful'] !== true) {
-                throw new Registrar_Exception('Connect could not update nameservers for :domain.', [
-                    ':domain' => $domain->getName(),
-                ]);
-            }
-
-            return true;
-        }
+        $this->callApi(
+            'update nameservers for ' . $domain->getName(),
+            fn (): array => $this->getRegistrarClient()->setNameServers($domain->getName(), $this->getNameservers($domain)),
+        );
 
         return true;
     }
 
     public function transferDomain(Registrar_Domain $domain): bool
     {
-        $client = $this->getRegistrarClient();
-        $method = new ReflectionMethod($client, 'transfer');
-
-        $this->callApi('transfer ' . $domain->getName(), function () use ($client, $domain, $method) {
-            // Older releases use transfer(domain, authCode, contacts, years, nameservers).
-            if ($method->getNumberOfParameters() >= 5) {
-                return $client->transfer(
-                    $domain->getName(),
-                    (string) $domain->getEpp(),
-                    $this->getContacts($domain),
-                    $this->getPeriod($domain),
-                    $this->getNameservers($domain),
-                );
-            }
-
-            // Current releases use transfer(domain, authCode, purchasePrice).
-            return $client->transfer($domain->getName(), (string) $domain->getEpp());
-        });
+        $this->callApi(
+            'transfer ' . $domain->getName(),
+            fn (): array => $this->getRegistrarClient()->transferDomain($domain->getName(), [
+                'auth_code' => (string) $domain->getEpp(),
+                'years' => $this->getPeriod($domain),
+            ]),
+        );
 
         return true;
     }
@@ -182,16 +155,16 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             fn () => $this->getRegistrarClient()->getDomain($domain->getName()),
         );
 
-        $createdAt = $details->createdAt ?? null;
-        $expiresAt = $details->expiresAt ?? null;
-        $remoteNameservers = $details->nameservers ?? null;
+        $createdAt = $details['created_at'] ?? null;
+        $expiresAt = $details['expires_at'] ?? null;
+        $remoteNameservers = $details['nameservers'] ?? null;
 
-        if ($createdAt instanceof DateTimeInterface) {
-            $domain->setRegistrationTime($createdAt->getTimestamp());
+        if ($createdAt !== null && ($timestamp = strtotime((string) $createdAt)) !== false) {
+            $domain->setRegistrationTime($timestamp);
         }
 
-        if ($expiresAt instanceof DateTimeInterface) {
-            $domain->setExpirationTime($expiresAt->getTimestamp());
+        if ($expiresAt !== null && ($timestamp = strtotime((string) $expiresAt)) !== false) {
+            $domain->setExpirationTime($timestamp);
         }
 
         if (is_array($remoteNameservers)) {
@@ -222,12 +195,11 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         $this->callApi(
             'register ' . $domain->getName(),
-            fn () => $this->getRegistrarClient()->purchase(
-                $domain->getName(),
-                $this->getContacts($domain),
-                $this->getPeriod($domain),
-                $this->getNameservers($domain),
-            ),
+            fn () => $this->getRegistrarClient()->registerDomain($domain->getName(), [
+                'contacts' => $this->getContacts($domain),
+                'years' => $this->getPeriod($domain),
+                'nameservers' => $this->getNameservers($domain),
+            ]),
         );
 
         return true;
@@ -237,7 +209,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         $this->callApi(
             'renew ' . $domain->getName(),
-            fn () => $this->getRegistrarClient()->renew($domain->getName(), $this->getPeriod($domain)),
+            fn () => $this->getRegistrarClient()->renewDomain($domain->getName(), $this->getPeriod($domain)),
         );
 
         return true;
@@ -257,18 +229,17 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
             /*
             OpenSRS privacy protection is not currently implemented by the
-            Namingo Registrars adapter.
+            Cardo DRS adapter.
             */
             return true;
         }
 
-        return (bool) $this->callApi(
+        $this->callApi(
             'enable privacy protection for ' . $domain->getName(),
-            fn (): bool => $this->getRegistrarClient()->updateDomain(
-                $domain->getName(),
-                new NamingoUpdateDetails(privacy: true),
-            ),
+            fn (): array => $this->getRegistrarClient()->raw('domains/' . rawurlencode($domain->getName()) . ':enableWhoisPrivacy', ['_method' => 'POST']),
         );
+
+        return true;
     }
 
     public function disablePrivacyProtection(Registrar_Domain $domain): bool
@@ -276,26 +247,30 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
             /*
             OpenSRS privacy protection is not currently implemented by the
-            Namingo Registrars adapter.
+            Cardo DRS adapter.
             */
             return true;
         }
 
-        return (bool) $this->callApi(
+        $this->callApi(
             'disable privacy protection for ' . $domain->getName(),
-            fn (): bool => $this->getRegistrarClient()->updateDomain(
-                $domain->getName(),
-                new NamingoUpdateDetails(privacy: false),
-            ),
+            fn (): array => $this->getRegistrarClient()->raw('domains/' . rawurlencode($domain->getName()) . ':disableWhoisPrivacy', ['_method' => 'POST']),
         );
+
+        return true;
     }
 
     public function getEpp(Registrar_Domain $domain): string
     {
-        return (string) $this->callApi(
+        $result = $this->callApi(
             'retrieve the transfer code for ' . $domain->getName(),
-            fn (): string => $this->getRegistrarClient()->getAuthCode($domain->getName()),
+            fn (): array => $this->getRegistrarClient()->getAuthCode($domain->getName()),
         );
+        if (empty($result['auth_code'])) {
+            throw new Registrar_Exception('Connect received an empty transfer code.');
+        }
+
+        return (string) $result['auth_code'];
     }
 
     public function lock(Registrar_Domain $domain): bool
@@ -303,18 +278,17 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
             /*
             OpenSRS registrar locking is not currently implemented by the
-            Namingo Registrars adapter.
+            Cardo DRS adapter.
             */
             return true;
         }
 
-        return (bool) $this->callApi(
+        $this->callApi(
             'lock ' . $domain->getName(),
-            fn (): bool => $this->getRegistrarClient()->updateDomain(
-                $domain->getName(),
-                new NamingoUpdateDetails(locked: true),
-            ),
+            fn (): array => $this->getRegistrarClient()->raw('domains/' . rawurlencode($domain->getName()) . ':lock', ['_method' => 'POST']),
         );
+
+        return true;
     }
 
     public function unlock(Registrar_Domain $domain): bool
@@ -322,64 +296,41 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
             /*
             OpenSRS registrar unlocking is not currently implemented by the
-            Namingo Registrars adapter.
+            Cardo DRS adapter.
             */
             return true;
         }
 
-        return (bool) $this->callApi(
+        $this->callApi(
             'unlock ' . $domain->getName(),
-            fn (): bool => $this->getRegistrarClient()->updateDomain(
-                $domain->getName(),
-                new NamingoUpdateDetails(locked: false),
-            ),
+            fn (): array => $this->getRegistrarClient()->raw('domains/' . rawurlencode($domain->getName()) . ':unlock', ['_method' => 'POST']),
         );
+
+        return true;
     }
 
-    private function getRegistrarClient(): NamingoRegistrars
+    private function getRegistrarClient(): BaseAdapter
     {
-        if ($this->registrarClient instanceof NamingoRegistrars) {
+        if ($this->registrarClient instanceof BaseAdapter) {
             return $this->registrarClient;
         }
 
-        if ($this->config['registrar'] === self::REGISTRAR_NAMECOM) {
-            $endpoint = $this->config['environment'] === self::ENVIRONMENT_PRODUCTION
-                ? 'https://api.name.com'
-                : 'https://api.dev.name.com';
+        $endpoint = $this->config['registrar'] === self::REGISTRAR_NAMECOM
+            ? ($this->config['environment'] === self::ENVIRONMENT_PRODUCTION ? 'https://api.name.com' : 'https://api.dev.name.com')
+            : ($this->config['environment'] === self::ENVIRONMENT_PRODUCTION ? 'https://rr-n1-tor.opensrs.net:55443' : 'https://horizon.opensrs.net:55443');
 
-            $constructor = new ReflectionMethod(NameCom::class, '__construct');
-            $adapter = $constructor->getNumberOfParameters() >= 4
-                ? new NameCom($this->config['username'], $this->config['api_key'], [], $endpoint)
-                : new NameCom($this->config['username'], $this->config['api_key'], $endpoint);
-        } else {
-            $endpoint = $this->config['environment'] === self::ENVIRONMENT_PRODUCTION
-                ? 'https://rr-n1-tor.opensrs.net:55443'
-                : 'https://horizon.opensrs.net:55443';
-
-            $constructor = new ReflectionMethod(OpenSRS::class, '__construct');
-            $adapter = $constructor->getNumberOfParameters() >= 5
-                ? new OpenSRS(
-                    $this->config['api_key'],
-                    $this->config['username'],
-                    $this->config['password'],
-                    [],
-                    $endpoint,
-                )
-                : new OpenSRS(
-                    $this->config['api_key'],
-                    $this->config['username'],
-                    $this->config['password'],
-                    $endpoint,
-                );
-        }
-
-        $this->registrarClient = new NamingoRegistrars($adapter);
+        $this->registrarClient = RegistrarAPI::make($this->config['registrar'], [
+            'username' => $this->config['username'],
+            'api_key' => $this->config['api_key'],
+            'password' => $this->config['password'],
+            'endpoint' => $endpoint,
+        ]);
 
         return $this->registrarClient;
     }
 
     /**
-     * @return NamingoContact[]
+     * @return array<string, array<string, string>>
      */
     private function getContacts(Registrar_Domain $domain): array
     {
@@ -392,27 +343,25 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         }
 
         $contacts = [
-            $registrant,
-            $domain->getContactAdmin() ?? $registrant,
-            $domain->getContactTech() ?? $registrant,
-            $domain->getContactBilling() ?? $registrant,
+            'registrant' => $registrant,
+            'admin' => $domain->getContactAdmin() ?? $registrant,
+            'tech' => $domain->getContactTech() ?? $registrant,
+            'billing' => $domain->getContactBilling() ?? $registrant,
         ];
 
-        return array_map(fn (Registrar_Domain_Contact $contact): NamingoContact => new NamingoContact(
-            (string) $contact->getFirstName(),
-            (string) $contact->getLastName(),
-            $this->formatPhone($contact),
-            (string) $contact->getEmail(),
-            (string) $contact->getAddress1(),
-            (string) $contact->getAddress2(),
-            (string) $contact->getAddress3(),
-            (string) $contact->getCity(),
-            (string) $contact->getState(),
-            strtoupper((string) $contact->getCountry()),
-            (string) $contact->getZip(),
-            (string) $contact->getCompany(),
-            (string) $contact->getName(),
-        ), $contacts);
+        return array_map(fn (Registrar_Domain_Contact $contact): array => [
+            'first_name' => (string) $contact->getFirstName(),
+            'last_name' => (string) $contact->getLastName(),
+            'phone' => $this->formatPhone($contact),
+            'email' => (string) $contact->getEmail(),
+            'address1' => (string) $contact->getAddress1(),
+            'address2' => trim((string) $contact->getAddress2() . ' ' . (string) $contact->getAddress3()),
+            'city' => (string) $contact->getCity(),
+            'state' => (string) $contact->getState(),
+            'country' => strtoupper((string) $contact->getCountry()),
+            'postal_code' => (string) $contact->getZip(),
+            'organization' => (string) $contact->getCompany(),
+        ], $contacts);
     }
 
     /**
@@ -473,7 +422,14 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     private function callApi(string $operation, callable $callback)
     {
         try {
-            return $callback();
+            $result = $callback();
+            if (!is_array($result) || ($result['ok'] ?? false) !== true) {
+                throw new RuntimeException(is_array($result)
+                    ? (string) (($result['err'] ?? '') ?: ($result['text'] ?? 'Registrar API request failed'))
+                    : 'Invalid registrar API response');
+            }
+
+            return $result;
         } catch (Registrar_Exception $exception) {
             throw $exception;
         } catch (Throwable $exception) {
