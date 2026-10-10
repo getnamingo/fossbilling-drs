@@ -28,6 +28,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     private const PROVIDERS = [
         'opensrs' => 'OpenSRS', 'namecom' => 'Name.com', 'godaddy' => 'GoDaddy',
         'namesilo' => 'NameSilo', 'dynadot' => 'Dynadot', 'namecheap' => 'Namecheap',
+        'opusdns' => 'OpusDNS',
     ];
 
     private const ENVIRONMENT_TEST = 'test';
@@ -79,6 +80,10 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             $this->requireSetting('username', 'Username');
         }
         $this->requireSetting('api_key', 'API key / API token');
+        if ($this->config['registrar'] === 'opusdns'
+            && !class_exists(\Namingo\Cardo\DRS\Adapters\OpusDNS::class)) {
+            throw new Registrar_Exception('OpusDNS requires a Cardo DRS version containing the OpusDNS adapter. Update namingo/cardo-drs in the namingo directory.');
+        }
 
         if ($this->config['registrar'] === self::REGISTRAR_OPENSRS) {
             $this->requireSetting('password', 'Password');
@@ -114,7 +119,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     public static function getConfig(): array
     {
         return [
-            'label' => 'Connect domains through the Cardo DRS library. Supports OpenSRS, Name.com, GoDaddy, NameSilo, Dynadot and Namecheap. NameSilo supports production only.',
+            'label' => 'Connect domains through the Cardo DRS library. Supports OpenSRS, Name.com, GoDaddy, NameSilo, Dynadot, Namecheap and OpusDNS. NameSilo supports production only.',
             'form' => [
                 'username' => ['text', [
                     'label' => 'Username',
@@ -214,9 +219,9 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             fn (): array => $this->config['registrar'] === 'dynadot'
                 ? $this->getRegistrarClient()->raw('transfer', ['domain' => $domain->getName(), 'auth' => (string) $domain->getEpp()])
                 : $this->getRegistrarClient()->transferDomain($domain->getName(), [
-                'auth_code' => (string) $domain->getEpp(),
-                'years' => $this->getPeriod($domain),
-            ]),
+                    'auth_code' => (string) $domain->getEpp(),
+                    'years' => $this->getPeriod($domain),
+                ] + ($this->config['registrar'] === 'opusdns' ? $this->registrationOptions($domain) : [])),
         );
 
         return true;
@@ -408,6 +413,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             'dynadot' => $production ? 'https://api.dynadot.com/api3.json' : 'https://api-sandbox.dynadot.com/api3.json',
             'namecheap' => $production ? 'https://api.namecheap.com/xml.response' : 'https://api.sandbox.namecheap.com/xml.response',
             'namesilo' => 'https://www.namesilo.com/api',
+            'opusdns' => $production ? 'https://api.opusdns.com' : 'https://sandbox.opusdns.com',
         };
 
         $credentials = [
@@ -452,6 +458,10 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             'phone' => $this->formatProviderPhone($contact),
             'email' => (string) $contact->getEmail(),
             'address1' => (string) $contact->getAddress1(),
+            'street' => $this->config['registrar'] === 'opusdns'
+                ? implode(', ', array_filter([(string) $contact->getAddress1(), (string) $contact->getAddress2(), (string) $contact->getAddress3()],
+                    static fn (string $line): bool => trim($line) !== ''))
+                : (string) $contact->getAddress1(),
             'address2' => trim((string) $contact->getAddress2() . ' ' . (string) $contact->getAddress3()),
             'city' => (string) $contact->getCity(),
             'state' => (string) $contact->getState(),

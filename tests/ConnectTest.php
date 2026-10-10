@@ -116,7 +116,7 @@ namespace {
         catch (Registrar_Exception $e) { check(str_contains($e->getMessage(), 'Denied'), 'OpenSRS error'); }
     }
     $providers = Registrar_Adapter_Connect::getConfig()['form']['registrar'][1]['multiOptions'];
-    check(count($providers) === 6, 'All Cardo providers selectable');
+    check(count($providers) === 7, 'All Cardo providers selectable');
     foreach (['godaddy', 'namecheap', 'dynadot', 'namesilo'] as $brand) {
         $options = ['registrar'=>$brand, 'environment'=>'production', 'api_key'=>'key',
             'api_secret'=>'secret', 'api_user'=>'user', 'client_ip'=>'192.0.2.1'];
@@ -282,6 +282,60 @@ namespace {
     ] as $options) {
         try { new Registrar_Adapter_Connect($options); throw new RuntimeException('Invalid configuration accepted'); }
         catch (Registrar_Exception $e) {}
+    }
+    foreach (['test'=>'https://sandbox.opusdns.com', 'production'=>'https://api.opusdns.com'] as $environment => $base) {
+        $opus = new Registrar_Adapter_Connect(['registrar'=>'opusdns', 'environment'=>$environment, 'api_key'=>'opus-key']);
+        Http::$response = [200, '{"results":[{"domain":"example.test","available":true}]}', ''];
+        check($opus->isDomainAvailable($domain), 'OpusDNS availability');
+        check(request()[1] === $base . '/v1/domains/check?domains=example.test', 'OpusDNS environment');
+        check(request()[2]['headers']['X-Api-Key'] === 'opus-key', 'OpusDNS credentials');
+        $fullAddress = new class extends Registrar_Domain {
+            public function getContactRegistrar(): Registrar_Domain_Contact {
+                return new class extends Registrar_Domain_Contact {
+                    public function getAddress2(): string { return 'Floor 2'; }
+                    public function getAddress3(): string { return 'Unit 3'; }
+                };
+            }
+        };
+        Http::$requests = [];
+        Http::$responses = [[201, '{"contact_id":"contact-42"}', ''], [201, '{"name":"example.test"}', '']];
+        check($opus->registerDomain($fullAddress), 'OpusDNS registration');
+        check(count(Http::$requests) === 2, 'One shared contact and one registration');
+        check(Http::$requests[0][2]['json']['street'] === '1 Test Street, Floor 2, Unit 3', 'OpusDNS full street address');
+        $purchase = request()[2]['json'];
+        check($purchase['period'] === ['unit'=>'y', 'value'=>2], 'OpusDNS period');
+        check($purchase['contacts']['registrant'] === [['contact_id'=>'contact-42']], 'OpusDNS contact handles');
+        check($purchase['nameservers'][0]['hostname'] === 'ns1.example.test', 'OpusDNS registration nameservers');
+        check($purchase['renewal_mode'] === 'expire', 'OpusDNS provider auto-renew disabled');
+        Http::$responses = [[201, '{"contact_id":"contact-43"}', ''], [202, '{}', '']];
+        check($opus->transferDomain($domain), 'OpusDNS transfer');
+        check(str_ends_with(request()[1], '/v1/domains/transfer') && request()[2]['json']['auth_code'] === 'secret', 'OpusDNS transfer auth');
+        check(isset(request()[2]['json']['contacts']['registrant'], request()[2]['json']['nameservers']), 'OpusDNS transfer contacts and nameservers');
+        Http::$response = [200, '{"name":"example.test","registered_on":"2025-01-01T00:00:00Z","expires_on":"2027-01-01T00:00:00Z","nameservers":[{"hostname":"ns1.example.test"}]}', ''];
+        $domain->values = [];
+        $opus->getDomainDetails($domain);
+        check($domain->values['setRegistrationTime'] === 1735689600 && $domain->values['setExpirationTime'] === 1798761600, 'OpusDNS date mapping');
+        check($domain->values['setNs1'] === 'ns1.example.test', 'OpusDNS remote nameservers');
+        Http::$responses = [Http::$response, [200, '{}', '']];
+        check($opus->renewDomain($domain), 'OpusDNS renewal');
+        check(request()[2]['json']['current_expiry_date'] === '2027-01-01T00:00:00Z', 'OpusDNS current renewal expiry');
+        check(request()[2]['json']['period'] === ['unit'=>'y', 'value'=>2], 'OpusDNS renewal period');
+        Http::$response = [200, '{}', ''];
+        check($opus->modifyNs($domain), 'OpusDNS nameserver update');
+        check(request()[0] === 'PATCH' && request()[2]['json']['nameservers'][0]['hostname'] === 'ns1.example.test', 'OpusDNS nameserver payload');
+        foreach (['getEpp', 'lock', 'unlock', 'enablePrivacyProtection', 'disablePrivacyProtection'] as $method) {
+            $count = count(Http::$requests);
+            try { $opus->$method($domain); throw new RuntimeException('Unsupported OpusDNS operation accepted'); }
+            catch (Registrar_Exception $e) {}
+            check(count(Http::$requests) === $count, 'No unsupported OpusDNS request');
+        }
+        foreach ([[403, '{"detail":"Denied"}', ''], [0, '', 'Connection failed']] as $failure) {
+            Http::$response = $failure;
+            foreach (['registerDomain', 'transferDomain', 'renewDomain', 'getDomainDetails', 'modifyNs', 'isDomainAvailable'] as $method) {
+                try { $opus->$method($domain); throw new RuntimeException('OpusDNS failure accepted'); }
+                catch (Registrar_Exception $e) {}
+            }
+        }
     }
     echo "Connect integration tests passed\n";
 }
