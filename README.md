@@ -34,7 +34,6 @@ If this is not your first registrar module, you may skip copying the `namingo/` 
 
 ## Upgrade
 
-- For existing Connect installations, copy both `DRS.php` and the compatibility `Connect.php` into the adapter directory to keep existing registrar configurations working. New installations use `DRS.php`.
 - Before upgrading, note your current module settings.
 - Download the updated module and repeat the installation steps to replace the existing files.
 - After upgrading, verify that your module settings are still correct.
