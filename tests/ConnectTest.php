@@ -6,10 +6,11 @@ namespace Namingo\Cardo\DRS\Core {
     // Replace only transport; exercise the installed Cardo adapters unchanged.
     final class Http {
         public static array $requests = [];
+        public static array $responses = [];
         public static array $response = [200, '{}', ''];
         public static function request(string $method, string $url, array $options = [], int $timeout = 30): array {
             self::$requests[] = [$method, $url, $options];
-            return self::$response;
+            return self::$responses !== [] ? array_shift(self::$responses) : self::$response;
         }
     }
 }
@@ -109,6 +110,115 @@ namespace {
         Http::$response = [200, '<OPS_envelope><body><data_block><dt_assoc><item key="response_code">400</item><item key="response_text">Denied</item></dt_assoc></data_block></body></OPS_envelope>', ''];
         try { $module->modifyNs($domain); throw new RuntimeException('OpenSRS failure accepted'); }
         catch (Registrar_Exception $e) { check(str_contains($e->getMessage(), 'Denied'), 'OpenSRS error'); }
+    }
+    $providers = Registrar_Adapter_Connect::getConfig()['form']['registrar'][1]['multiOptions'];
+    check(count($providers) === 6, 'All Cardo providers selectable');
+    foreach (['godaddy', 'namecheap', 'dynadot', 'namesilo'] as $brand) {
+        $options = ['registrar'=>$brand, 'environment'=>'production', 'api_key'=>'key',
+            'api_secret'=>'secret', 'api_user'=>'user', 'client_ip'=>'192.0.2.1'];
+        $module = new Registrar_Adapter_Connect($options);
+        $httpResponses = match ($brand) {
+            'godaddy' => [200, json_encode(['domain'=>'example.test', 'available'=>true]), ''],
+            'namesilo' => [200, json_encode(['reply'=>['code'=>300, 'available'=>['domain'=>'example.test']]]), ''],
+            'dynadot' => [200, json_encode(['SearchResponse'=>['ResponseCode'=>0, 'SearchResults'=>[['DomainName'=>'example.test', 'Available'=>'yes']]]]), ''],
+            'namecheap' => [200, '<ApiResponse Status="OK"><CommandResponse><DomainCheckResult Domain="example.test" Available="true" /></CommandResponse></ApiResponse>', ''],
+        };
+        Http::$response = $httpResponses;
+        check($module->isDomainAvailable($domain), $brand . ' availability');
+        $req = request();
+        if ($brand === 'godaddy') check($req[2]['headers']['Authorization'] === 'sso-key key:secret', 'GoDaddy secret mapping');
+        if ($brand === 'namecheap') check($req[2]['query']['ApiUser'] === 'user' && $req[2]['query']['ClientIp'] === '192.0.2.1', 'Namecheap credentials');
+        if ($brand === 'dynadot') check($req[2]['query']['domain0'] === 'example.test', 'Dynadot search parameter');
+
+        $success = match ($brand) {
+            'godaddy' => [200, '{}', ''],
+            'namesilo' => [200, '{"reply":{"code":300,"detail":"success"}}', ''],
+            'dynadot' => [200, '{"RegisterResponse":{"ResponseCode":0,"Status":"success"}}', ''],
+            'namecheap' => [200, '<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Registered="true" /></CommandResponse></ApiResponse>', ''],
+        };
+        Http::$response = $success;
+        Http::$requests = [];
+        if ($brand === 'dynadot') {
+            Http::$responses = [[200, '{"CreateContactResponse":{"ResponseCode":0,"Status":"success","CreateContactContent":{"ContactId":"42"}}}', ''], $success, $success];
+        }
+        check($module->registerDomain($domain), $brand . ' registration');
+        $purchase = Http::$requests[$brand === 'dynadot' ? 1 : 0];
+        if ($brand === 'godaddy') {
+            check($purchase[2]['json']['contactRegistrant']['nameFirst'] === 'Ada', 'GoDaddy contact format');
+            check($purchase[2]['json']['contactRegistrant']['addressMailing']['country'] === 'GB', 'GoDaddy address');
+            check($purchase[2]['json']['consent']['agreedBy'] === '192.0.2.1', 'Consent IP');
+            check($purchase[2]['json']['renewAuto'] === false, 'GoDaddy auto-renew disabled');
+        }
+        if ($brand === 'namesilo') {
+            check($purchase[2]['query']['rr_fn'] === 'Ada' && $purchase[2]['query']['rr_ad'] === '1 Test Street', 'NameSilo registrant mapping');
+            check(request()[2]['query']['ns1'] === 'ns1.example.test', 'NameSilo nameserver parameters');
+        }
+        if ($brand === 'dynadot') {
+            check($purchase[2]['query']['registrant_contact'] === '42' && $purchase[2]['query']['technical_contact'] === '42', 'Dynadot per-customer contact IDs');
+            check(count(Http::$requests) === 3, 'Identical Dynadot contacts reused within registration');
+            check(request()[2]['query']['ns0'] === 'ns1.example.test', 'Dynadot nameserver parameters');
+        }
+        if ($brand === 'namecheap') check($purchase[2]['query']['RegistrantFirstName'] === 'Ada', 'Namecheap customer contact');
+        check($module->transferDomain($domain), $brand . ' transfer');
+        if ($brand === 'dynadot') check(request()[2]['query']['auth'] === 'secret', 'Dynadot transfer authorization parameter');
+        check($module->renewDomain($domain), $brand . ' renew');
+        check($module->modifyNs($domain), $brand . ' nameservers');
+        if ($brand === 'godaddy') check(request()[0] === 'PATCH' && request()[2]['json']['nameServers'] === ['ns1.example.test', 'ns2.example.test'], 'GoDaddy nameserver endpoint');
+
+        Http::$response = match ($brand) {
+            'godaddy' => [200, '{"createdAt":"2025-01-01T00:00:00Z","expires":"2027-01-01T00:00:00Z","nameServers":["ns1.example.test"]}', ''],
+            'namesilo' => [200, '{"reply":{"code":300,"created":"2025-01-01T00:00:00Z","expires":"2027-01-01T00:00:00Z","nameservers":{"nameserver":"ns1.example.test"}}}', ''],
+            'dynadot' => [200, '{"DomainInfoResponse":{"ResponseCode":0,"DomainInfo":{"Registration":"1735689600000","Expiration":"1798761600000","NameServerSettings":{"NameServers":["ns1.example.test"]}}}}', ''],
+            'namecheap' => [200, '<ApiResponse Status="OK"><CommandResponse><DomainGetInfoResult><DomainDetails><CreatedDate>2025-01-01T00:00:00Z</CreatedDate><ExpiredDate>2027-01-01T00:00:00Z</ExpiredDate></DomainDetails><DnsDetails><Nameserver>ns1.example.test</Nameserver></DnsDetails></DomainGetInfoResult></CommandResponse></ApiResponse>', ''],
+        };
+        $domain->values = [];
+        $module->getDomainDetails($domain);
+        check($domain->values['setRegistrationTime'] === 1735689600, $brand . ' creation date');
+        check($domain->values['setExpirationTime'] === 1798761600, $brand . ' expiration date');
+        check($domain->values['setNs1'] === 'ns1.example.test', $brand . ' remote nameservers');
+        foreach (['getEpp', 'lock', 'unlock', 'enablePrivacyProtection', 'disablePrivacyProtection', 'modifyContact', 'deleteDomain'] as $method) {
+            $count = count(Http::$requests);
+            try { $module->$method($domain); throw new RuntimeException('Unsupported action accepted: ' . $method); }
+            catch (Registrar_Exception $e) {}
+            check(count(Http::$requests) === $count, 'Unsupported action sends no request');
+        }
+        Http::$response = match ($brand) {
+            'godaddy' => [403, '{"code":"ACCESS_DENIED"}', ''],
+            'namesilo' => [200, '{"reply":{"code":200,"detail":"Denied"}}', ''],
+            'dynadot' => [200, '{"RenewResponse":{"ResponseCode":-1,"Status":"error","Error":"Denied"}}', ''],
+            'namecheap' => [200, '<ApiResponse Status="ERROR"><Errors><Error>Denied</Error></Errors></ApiResponse>', ''],
+        };
+        foreach (['renewDomain', 'transferDomain', 'modifyNs', 'getDomainDetails'] as $method) {
+            try { $module->$method($domain); throw new RuntimeException('Provider error accepted'); }
+            catch (Registrar_Exception $e) {}
+        }
+        Http::$response = [0, '', 'Network unavailable'];
+        try { $module->renewDomain($domain); throw new RuntimeException('Transport failure accepted'); }
+        catch (Registrar_Exception $e) {}
+    }
+    foreach (['godaddy'=>'https://api.ote-godaddy.com/v1', 'dynadot'=>'https://api-sandbox.dynadot.com/api3.json', 'namecheap'=>'https://api.sandbox.namecheap.com/xml.response'] as $brand => $endpoint) {
+        $module = new Registrar_Adapter_Connect(['registrar'=>$brand, 'api_key'=>'key', 'api_secret'=>'secret', 'api_user'=>'user', 'client_ip'=>'192.0.2.1']);
+        Http::$response = [403, '{}', ''];
+        try { $module->renewDomain($domain); } catch (Registrar_Exception $e) {}
+        check(str_starts_with(request()[1], $endpoint), $brand . ' sandbox');
+    }
+    $module = new Registrar_Adapter_Connect(['registrar'=>'namesilo', 'environment'=>'production', 'api_key'=>'key']);
+    Http::$requests = [];
+    Http::$responses = [[200, '{"reply":{"code":300}}', ''], [503, '{}', '']];
+    check($module->registerDomain($domain), 'Completed purchase remains successful after nameserver failure');
+    check(count(Http::$requests) === 2, 'One purchase and one nameserver attempt');
+    $module = new Registrar_Adapter_Connect(['registrar'=>'godaddy', 'api_key'=>'key', 'api_secret'=>'secret', 'client_ip'=>'192.0.2.1', 'endpoint'=>'https://example.test/v1']);
+    Http::$response = [200, '{}', ''];
+    check($module->registerDomain($domain), 'GoDaddy purchase');
+    check(request()[1] === 'https://example.test/v1/domains/purchase', 'Endpoint override and correct purchase path');
+    foreach ([
+        ['registrar'=>'namesilo', 'api_key'=>'key'],
+        ['registrar'=>'godaddy', 'api_key'=>'key'],
+        ['registrar'=>'namecheap', 'api_key'=>'key', 'api_user'=>'user', 'client_ip'=>'invalid'],
+        ['registrar'=>'dynadot', 'api_key'=>'key', 'endpoint'=>'http://example.test'],
+    ] as $options) {
+        try { new Registrar_Adapter_Connect($options); throw new RuntimeException('Invalid configuration accepted'); }
+        catch (Registrar_Exception $e) {}
     }
     echo "Connect integration tests passed\n";
 }

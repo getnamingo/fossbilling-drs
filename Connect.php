@@ -17,11 +17,18 @@ if (file_exists($autoload)) {
 
 use Namingo\Cardo\DRS\RegistrarAPI;
 use Namingo\Cardo\DRS\Core\BaseAdapter;
+use Namingo\Cardo\DRS\Core\Http;
+use Namingo\Cardo\DRS\Adapters\GoDaddy;
 
 class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 {
     private const REGISTRAR_OPENSRS = 'opensrs';
     private const REGISTRAR_NAMECOM = 'namecom';
+
+    private const PROVIDERS = [
+        'opensrs' => 'OpenSRS', 'namecom' => 'Name.com', 'godaddy' => 'GoDaddy',
+        'namesilo' => 'NameSilo', 'dynadot' => 'Dynadot', 'namecheap' => 'Namecheap',
+    ];
 
     private const ENVIRONMENT_TEST = 'test';
     private const ENVIRONMENT_PRODUCTION = 'production';
@@ -32,6 +39,10 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         'username' => '',
         'api_key' => '',
         'password' => '',
+        'api_secret' => '',
+        'api_user' => '',
+        'client_ip' => '',
+        'endpoint' => '',
     ];
 
     private ?BaseAdapter $registrarClient = null;
@@ -52,7 +63,11 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         $this->config['api_key'] = trim((string) ($options['api_key'] ?? ''));
         $this->config['password'] = (string) ($options['password'] ?? '');
 
-        if (!in_array($this->config['registrar'], [self::REGISTRAR_OPENSRS, self::REGISTRAR_NAMECOM], true)) {
+        foreach (['api_secret', 'api_user', 'client_ip', 'endpoint'] as $key) {
+            $this->config[$key] = trim((string) ($options[$key] ?? ''));
+        }
+
+        if (!isset(self::PROVIDERS[$this->config['registrar']])) {
             throw new Registrar_Exception('Connect has an invalid registrar selection.');
         }
 
@@ -60,43 +75,85 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             throw new Registrar_Exception('Connect has an invalid environment selection.');
         }
 
-        $this->requireSetting('username', 'Username');
+        if (in_array($this->config['registrar'], ['opensrs', 'namecom'], true)) {
+            $this->requireSetting('username', 'Username');
+        }
         $this->requireSetting('api_key', 'API key / API token');
 
         if ($this->config['registrar'] === self::REGISTRAR_OPENSRS) {
             $this->requireSetting('password', 'Password');
         }
+        if ($this->config['registrar'] === 'godaddy') {
+            $this->requireSetting('api_secret', 'GoDaddy API secret');
+            $this->requireSetting('client_ip', 'GoDaddy registration consent IP');
+        }
+        if ($this->config['registrar'] === 'godaddy'
+            && filter_var($this->config['client_ip'], FILTER_VALIDATE_IP) === false) {
+            throw new Registrar_Exception('GoDaddy registration consent requires a valid IP address.');
+        }
+        if ($this->config['registrar'] === 'namecheap') {
+            $this->config['api_user'] = $this->config['api_user'] ?: $this->config['username'];
+            $this->requireSetting('api_user', 'Namecheap API user');
+            $this->requireSetting('client_ip', 'Namecheap whitelisted server IPv4');
+            if (filter_var($this->config['client_ip'], FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+                throw new Registrar_Exception('Namecheap requires a valid whitelisted server IPv4 address.');
+            }
+        }
+        if ($this->config['registrar'] === 'namesilo'
+            && ($this->config['environment'] === self::ENVIRONMENT_TEST || $this->config['endpoint'] !== '')) {
+            throw new Registrar_Exception('The installed Cardo NameSilo adapter uses a fixed production endpoint. Select Production; sandbox and endpoint overrides are not supported.');
+        }
+        if ($this->config['endpoint'] !== ''
+            && (filter_var($this->config['endpoint'], FILTER_VALIDATE_URL) === false
+                || parse_url($this->config['endpoint'], PHP_URL_SCHEME) !== 'https')) {
+            throw new Registrar_Exception('Connect endpoint must be a valid HTTPS URL.');
+        }
+
     }
 
     public static function getConfig(): array
     {
         return [
-            'label' => 'Connect domains through the Cardo DRS library. Supports OpenSRS and Name.com, with separate test and production endpoints.',
+            'label' => 'Connect domains through the Cardo DRS library. Supports OpenSRS, Name.com, GoDaddy, NameSilo, Dynadot and Namecheap. NameSilo supports production only.',
             'form' => [
                 'username' => ['text', [
                     'label' => 'Username',
-                    'description' => 'The username used for registrar authentication, such as a reseller or API username.',
+                    'description' => 'Required for OpenSRS and Name.com; optional fallback for Namecheap API user.',
+                    'required' => false,
                 ]],
                 'api_key' => ['password', [
                     'label' => 'API Key / API Token',
                     'description' => 'The API key or token used for registrar authentication.',
                 ]],
                 'password' => ['password', [
-                    'label' => 'Password / Secret Key',
-                    'description' => 'The password or secret key, if required by the registrar.',
+                    'label' => 'OpenSRS Password',
+                    'description' => 'Required only for OpenSRS.',
                     'required' => false,
+                ]],
+                'api_secret' => ['password', [
+                    'label' => 'GoDaddy API Secret', 'required' => false,
+                    'description' => 'Required only for GoDaddy, together with API Key.',
+                ]],
+                'api_user' => ['text', [
+                    'label' => 'Namecheap API User', 'required' => false,
+                    'description' => 'Namecheap account with API access. Defaults to Username if empty.',
+                ]],
+                'client_ip' => ['text', [
+                    'label' => 'Client IP', 'required' => false,
+                    'description' => 'Namecheap: whitelisted outgoing server IPv4. GoDaddy: IP used for registration consent; configure only after obtaining customer agreement.',
+                ]],
+                'endpoint' => ['text', [
+                    'label' => 'API Endpoint Override', 'required' => false,
+                    'description' => 'Optional HTTPS base URL including API path. Empty uses the selected environment. Not supported by NameSilo.',
                 ]],
                 'registrar' => ['select', [
                     'label' => 'Registrar',
                     'description' => 'Choose the registrar adapter used for this connection.',
-                    'multiOptions' => [
-                        self::REGISTRAR_OPENSRS => 'OpenSRS',
-                        self::REGISTRAR_NAMECOM => 'Name.com',
-                    ],
+                    'multiOptions' => self::PROVIDERS,
                 ]],
                 'environment' => ['select', [
                     'label' => 'Environment',
-                    'description' => 'Test uses the registrar sandbox endpoint; production performs live operations.',
+                    'description' => 'Test uses the sandbox endpoint; production performs live operations. NameSilo requires Production. An endpoint override takes precedence.',
                     'multiOptions' => [
                         self::ENVIRONMENT_TEST => 'Test',
                         self::ENVIRONMENT_PRODUCTION => 'Production',
@@ -108,6 +165,17 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 
     public function isDomainAvailable(Registrar_Domain $domain): bool
     {
+        if ($this->config['registrar'] === 'dynadot') {
+            $result = $this->callApi('check availability for ' . $domain->getName(),
+                fn (): array => $this->getRegistrarClient()->raw('search', ['domain0' => $domain->getName()]));
+            foreach ($result['raw']['SearchResponse']['SearchResults'] ?? [] as $row) {
+                if (strtolower((string) ($row['DomainName'] ?? '')) === strtolower($domain->getName())) {
+                    return strtolower((string) ($row['Available'] ?? '')) === 'yes';
+                }
+            }
+            throw new Registrar_Exception('Dynadot returned no availability result for the requested domain.');
+        }
+
         $result = $this->callApi(
             'check availability for ' . $domain->getName(),
             fn (): array => $this->getRegistrarClient()->checkAvailability([$domain->getName()]),
@@ -129,7 +197,11 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         $this->callApi(
             'update nameservers for ' . $domain->getName(),
-            fn (): array => $this->getRegistrarClient()->setNameServers($domain->getName(), $this->getNameservers($domain)),
+            fn (): array => $this->config['registrar'] === 'dynadot'
+                ? $this->getRegistrarClient()->raw('set_ns', ['domain' => $domain->getName()] + $this->indexedNameservers($domain, 'ns', 0))
+                : ($this->config['registrar'] === 'namesilo'
+                    ? $this->getRegistrarClient()->raw('changeNameServers', ['domain' => $domain->getName()] + $this->indexedNameservers($domain, 'ns', 1))
+                    : $this->getRegistrarClient()->setNameServers($domain->getName(), $this->getNameservers($domain))),
         );
 
         return true;
@@ -139,7 +211,9 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         $this->callApi(
             'transfer ' . $domain->getName(),
-            fn (): array => $this->getRegistrarClient()->transferDomain($domain->getName(), [
+            fn (): array => $this->config['registrar'] === 'dynadot'
+                ? $this->getRegistrarClient()->raw('transfer', ['domain' => $domain->getName(), 'auth' => (string) $domain->getEpp()])
+                : $this->getRegistrarClient()->transferDomain($domain->getName(), [
                 'auth_code' => (string) $domain->getEpp(),
                 'years' => $this->getPeriod($domain),
             ]),
@@ -152,18 +226,21 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         $details = $this->callApi(
             'get details for ' . $domain->getName(),
-            fn () => $this->getRegistrarClient()->getDomain($domain->getName()),
+            fn () => $this->config['registrar'] === 'dynadot'
+                ? $this->getRegistrarClient()->raw('domain_info', ['domain' => $domain->getName()])
+                : $this->getRegistrarClient()->getDomain($domain->getName()),
         );
 
+        $details = $this->normalizeDetails($details);
         $createdAt = $details['created_at'] ?? null;
         $expiresAt = $details['expires_at'] ?? null;
         $remoteNameservers = $details['nameservers'] ?? null;
 
-        if ($createdAt !== null && ($timestamp = strtotime((string) $createdAt)) !== false) {
+        if ($createdAt !== null && ($timestamp = $this->dateTimestamp($createdAt)) !== false) {
             $domain->setRegistrationTime($timestamp);
         }
 
-        if ($expiresAt !== null && ($timestamp = strtotime((string) $expiresAt)) !== false) {
+        if ($expiresAt !== null && ($timestamp = $this->dateTimestamp($expiresAt)) !== false) {
             $domain->setExpirationTime($timestamp);
         }
 
@@ -184,23 +261,36 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 
     public function deleteDomain(Registrar_Domain $domain): bool
     {
-        /*
-        $this->getLog()->debug('Removing domain: ' . $domain->getName());
-        */
-
-        return true;
+        throw new Registrar_Exception('This operation is not implemented by Connect for the selected Cardo provider.');
     }
 
     public function registerDomain(Registrar_Domain $domain): bool
     {
+        $options = $this->registrationOptions($domain);
+        if ($this->config['registrar'] === 'dynadot') {
+            $options = ['domain' => $domain->getName(), 'duration' => $this->getPeriod($domain)]
+                + $this->createDynadotContacts($domain);
+        }
+
         $this->callApi(
             'register ' . $domain->getName(),
-            fn () => $this->getRegistrarClient()->registerDomain($domain->getName(), [
-                'contacts' => $this->getContacts($domain),
-                'years' => $this->getPeriod($domain),
-                'nameservers' => $this->getNameservers($domain),
-            ]),
+            fn () => $this->config['registrar'] === 'dynadot'
+                ? $this->getRegistrarClient()->raw('register', $options)
+                : $this->getRegistrarClient()->registerDomain($domain->getName(), $options),
         );
+
+        // These Cardo registration methods do not send nameservers. The domain
+        // has already been purchased: never report a retryable registration
+        // failure for a subsequent nameserver update.
+        if (in_array($this->config['registrar'], ['namesilo', 'dynadot', 'namecheap'], true)
+            && $this->getNameservers($domain) !== []) {
+            try {
+                $this->modifyNs($domain);
+            } catch (Registrar_Exception $exception) {
+                $this->getLog()->error('Connect registered ' . $domain->getName()
+                    . ' but nameservers require a manual update: ' . $exception->getMessage());
+            }
+        }
 
         return true;
     }
@@ -217,21 +307,13 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 
     public function modifyContact(Registrar_Domain $domain): bool
     {
-        /*
-        $this->getLog()->debug('Updating contact info: ' . $domain->getName());
-        */
-
-        return true;
+        throw new Registrar_Exception('This operation is not implemented by Connect for the selected Cardo provider.');
     }
 
     public function enablePrivacyProtection(Registrar_Domain $domain): bool
     {
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
-            /*
-            OpenSRS privacy protection is not currently implemented by the
-            Cardo DRS adapter.
-            */
-            return true;
+            throw new Registrar_Exception('Privacy management is not exposed by Connect for this Cardo provider.');
         }
 
         $this->callApi(
@@ -245,11 +327,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     public function disablePrivacyProtection(Registrar_Domain $domain): bool
     {
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
-            /*
-            OpenSRS privacy protection is not currently implemented by the
-            Cardo DRS adapter.
-            */
-            return true;
+            throw new Registrar_Exception('Privacy management is not exposed by Connect for this Cardo provider.');
         }
 
         $this->callApi(
@@ -262,6 +340,10 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
 
     public function getEpp(Registrar_Domain $domain): string
     {
+        if (!method_exists($this->getRegistrarClient(), 'getAuthCode')) {
+            throw new Registrar_Exception('Transfer code retrieval is not exposed by this Cardo provider. Retrieve it through the provider account.');
+        }
+
         $result = $this->callApi(
             'retrieve the transfer code for ' . $domain->getName(),
             fn (): array => $this->getRegistrarClient()->getAuthCode($domain->getName()),
@@ -276,11 +358,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     public function lock(Registrar_Domain $domain): bool
     {
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
-            /*
-            OpenSRS registrar locking is not currently implemented by the
-            Cardo DRS adapter.
-            */
-            return true;
+            throw new Registrar_Exception('Registrar locking is not exposed by Connect for this Cardo provider.');
         }
 
         $this->callApi(
@@ -294,11 +372,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     public function unlock(Registrar_Domain $domain): bool
     {
         if ($this->config['registrar'] !== self::REGISTRAR_NAMECOM) {
-            /*
-            OpenSRS registrar unlocking is not currently implemented by the
-            Cardo DRS adapter.
-            */
-            return true;
+            throw new Registrar_Exception('Registrar locking is not exposed by Connect for this Cardo provider.');
         }
 
         $this->callApi(
@@ -315,16 +389,28 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             return $this->registrarClient;
         }
 
-        $endpoint = $this->config['registrar'] === self::REGISTRAR_NAMECOM
-            ? ($this->config['environment'] === self::ENVIRONMENT_PRODUCTION ? 'https://api.name.com' : 'https://api.dev.name.com')
-            : ($this->config['environment'] === self::ENVIRONMENT_PRODUCTION ? 'https://rr-n1-tor.opensrs.net:55443' : 'https://horizon.opensrs.net:55443');
+        $production = $this->config['environment'] === self::ENVIRONMENT_PRODUCTION;
+        $endpoint = $this->config['endpoint'] ?: match ($this->config['registrar']) {
+            'namecom' => $production ? 'https://api.name.com' : 'https://api.dev.name.com',
+            'opensrs' => $production ? 'https://rr-n1-tor.opensrs.net:55443' : 'https://horizon.opensrs.net:55443',
+            'godaddy' => $production ? 'https://api.godaddy.com/v1' : 'https://api.ote-godaddy.com/v1',
+            'dynadot' => $production ? 'https://api.dynadot.com/api3.json' : 'https://api-sandbox.dynadot.com/api3.json',
+            'namecheap' => $production ? 'https://api.namecheap.com/xml.response' : 'https://api.sandbox.namecheap.com/xml.response',
+            'namesilo' => 'https://www.namesilo.com/api',
+        };
 
-        $this->registrarClient = RegistrarAPI::make($this->config['registrar'], [
+        $credentials = [
             'username' => $this->config['username'],
+            'api_user' => $this->config['api_user'],
             'api_key' => $this->config['api_key'],
+            'api_secret' => $this->config['api_secret'],
             'password' => $this->config['password'],
-            'endpoint' => $endpoint,
-        ]);
+            'client_ip' => $this->config['client_ip'],
+            'base' => $endpoint,
+        ];
+        $this->registrarClient = $this->config['registrar'] === 'godaddy'
+            ? new Registrar_Connect_GoDaddy($credentials)
+            : RegistrarAPI::make($this->config['registrar'], $credentials);
 
         return $this->registrarClient;
     }
@@ -352,7 +438,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         return array_map(fn (Registrar_Domain_Contact $contact): array => [
             'first_name' => (string) $contact->getFirstName(),
             'last_name' => (string) $contact->getLastName(),
-            'phone' => $this->formatPhone($contact),
+            'phone' => $this->formatProviderPhone($contact),
             'email' => (string) $contact->getEmail(),
             'address1' => (string) $contact->getAddress1(),
             'address2' => trim((string) $contact->getAddress2() . ' ' . (string) $contact->getAddress3()),
@@ -387,9 +473,151 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         )));
     }
 
+    private function indexedNameservers(Registrar_Domain $domain, string $prefix, int $start): array
+    {
+        $params = [];
+        foreach ($this->getNameservers($domain) as $index => $server) {
+            $params[$prefix . ($index + $start)] = $server;
+        }
+        return $params;
+    }
+
+    private function registrationOptions(Registrar_Domain $domain): array
+    {
+        $contacts = $this->getContacts($domain);
+        if ($this->config['registrar'] === 'godaddy') {
+            $contacts = array_map(static fn (array $contact): array => [
+                'nameFirst' => $contact['first_name'], 'nameLast' => $contact['last_name'],
+                'email' => $contact['email'], 'phone' => $contact['phone'],
+                'organization' => $contact['organization'],
+                'addressMailing' => [
+                    'address1' => $contact['address1'], 'address2' => $contact['address2'],
+                    'city' => $contact['city'], 'state' => $contact['state'],
+                    'postalCode' => $contact['postal_code'], 'country' => $contact['country'],
+                ],
+            ], $contacts);
+        }
+        $registrant = $contacts['registrant'];
+        if ($this->config['registrar'] === 'namesilo') {
+            $registrant['address'] = $registrant['address1'];
+            $registrant['zip'] = $registrant['postal_code'];
+        }
+
+        return [
+            'contacts' => $contacts, 'registrant' => $registrant,
+            'years' => $this->getPeriod($domain), 'nameservers' => $this->getNameservers($domain),
+            'client_ip' => $this->config['client_ip'],
+            // Billing performs renewals; avoid provider-side duplicate billing.
+            'auto_renew' => false,
+        ];
+    }
+
+    private function createDynadotContacts(Registrar_Domain $domain): array
+    {
+        $ids = [];
+        $params = [];
+        foreach ($this->getContacts($domain) as $role => $contact) {
+            $fingerprint = json_encode($contact);
+            if (!isset($ids[$fingerprint])) {
+                $source = match ($role) {
+                    'registrant' => $domain->getContactRegistrar(),
+                    'admin' => $domain->getContactAdmin() ?? $domain->getContactRegistrar(),
+                    'tech' => $domain->getContactTech() ?? $domain->getContactRegistrar(),
+                    'billing' => $domain->getContactBilling() ?? $domain->getContactRegistrar(),
+                };
+                $countryCode = preg_replace('/\D+/', '', (string) $source->getTelCc());
+                $subscriber = preg_replace('/\D+/', '', (string) $source->getTel());
+                if (str_starts_with(trim((string) $source->getTel()), '+') && $countryCode !== ''
+                    && str_starts_with($subscriber, $countryCode)) {
+                    $subscriber = substr($subscriber, strlen($countryCode));
+                }
+                $result = $this->callApi('create Dynadot contact', fn (): array => $this->getRegistrarClient()->raw('create_contact', [
+                    'name' => trim($contact['first_name'] . ' ' . $contact['last_name']),
+                    'organization' => $contact['organization'], 'email' => $contact['email'],
+                    'phonecc' => $countryCode,
+                    'phonenum' => $subscriber,
+                    'address1' => $contact['address1'], 'address2' => $contact['address2'],
+                    'city' => $contact['city'], 'state' => $contact['state'],
+                    'zip' => $contact['postal_code'], 'country' => $contact['country'],
+                ]));
+                $id = $result['raw']['CreateContactResponse']['CreateContactContent']['ContactId'] ?? null;
+                if ($id === null || (string) $id === '') {
+                    throw new Registrar_Exception('Dynadot did not return a contact ID. Registration has not been submitted.');
+                }
+                $ids[$fingerprint] = (string) $id;
+            }
+            $params[($role === 'registrant' ? 'registrant' : ($role === 'tech' ? 'technical' : $role)) . '_contact'] = $ids[$fingerprint];
+        }
+        return $params;
+    }
+
+    private function normalizeDetails(array $result): array
+    {
+        $raw = $result['raw'] ?? [];
+        $data = match ($this->config['registrar']) {
+            'godaddy' => ['created_at' => $raw['createdAt'] ?? null, 'expires_at' => $raw['expires'] ?? null, 'nameservers' => $raw['nameServers'] ?? []],
+            'namesilo' => ['created_at' => $raw['reply']['created'] ?? null, 'expires_at' => $raw['reply']['expires'] ?? null,
+                'nameservers' => $raw['reply']['nameservers']['nameserver'] ?? $raw['reply']['nameservers'] ?? []],
+            'dynadot' => ['created_at' => $raw['DomainInfoResponse']['DomainInfo']['Registration'] ?? null,
+                'expires_at' => $raw['DomainInfoResponse']['DomainInfo']['Expiration'] ?? null,
+                'nameservers' => $raw['DomainInfoResponse']['DomainInfo']['NameServerSettings']['NameServers'] ?? []],
+            'namecheap' => ['created_at' => $raw['CommandResponse']['DomainGetInfoResult']['DomainDetails']['CreatedDate'] ?? null,
+                'expires_at' => $raw['CommandResponse']['DomainGetInfoResult']['DomainDetails']['ExpiredDate'] ?? null,
+                'nameservers' => $raw['CommandResponse']['DomainGetInfoResult']['DnsDetails']['Nameserver'] ?? []],
+            default => [],
+        };
+        $result += $data;
+        if (isset($result['nameservers']) && is_string($result['nameservers'])) {
+            $result['nameservers'] = [$result['nameservers']];
+        }
+        return $result;
+    }
+
+    private function dateTimestamp(mixed $date): int|false
+    {
+        if (is_numeric($date)) {
+            $number = (float) $date;
+            return (int) ($number > 100000000000 ? $number / 1000 : $number);
+        }
+        return strtotime((string) $date);
+    }
+
+    private function assertProviderSuccess(array $result): void
+    {
+        if (isset($result['http']) && ((int) $result['http'] <= 0 || (int) $result['http'] >= 400)) {
+            throw new RuntimeException((string) (($result['err'] ?? '') ?: 'Registrar HTTP request failed'));
+        }
+        $raw = $result['raw'] ?? [];
+        if ($this->config['registrar'] === 'namesilo') {
+            $reply = $raw['reply'] ?? [];
+            if (!isset($reply['code']) || !in_array((int) $reply['code'], [300, 301, 302], true)) {
+                throw new RuntimeException((string) ($reply['detail'] ?? 'Invalid NameSilo response'));
+            }
+        }
+        if ($this->config['registrar'] === 'dynadot') {
+            $response = is_array($raw) ? reset($raw) : false;
+            if (!is_array($response) || !isset($response['ResponseCode'])
+                || (int) $response['ResponseCode'] !== 0
+                || (isset($response['Status']) && strtolower((string) $response['Status']) === 'error')) {
+                throw new RuntimeException(is_array($response) ? (string) ($response['Error'] ?? 'Dynadot command failed') : 'Invalid Dynadot response');
+            }
+        }
+    }
+
     private function getPeriod(Registrar_Domain $domain): int
     {
         return max(1, (int) ($domain->getRegistrationPeriod() ?? 1));
+    }
+
+    private function formatProviderPhone(Registrar_Domain_Contact $contact): string
+    {
+        $phone = $this->formatPhone($contact);
+        $code = preg_replace('/\D+/', '', (string) $contact->getTelCc());
+        if (in_array($this->config['registrar'], ['godaddy', 'namecheap'], true)
+            && $code !== '' && str_starts_with($phone, '+' . $code)) {
+            return '+' . $code . '.' . substr($phone, strlen($code) + 1);
+        }
+        return $phone;
     }
 
     private function formatPhone(Registrar_Domain_Contact $contact): string
@@ -423,6 +651,9 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         try {
             $result = $callback();
+            if (is_array($result)) {
+                $this->assertProviderSuccess($result);
+            }
             if (!is_array($result) || ($result['ok'] ?? false) !== true) {
                 throw new RuntimeException(is_array($result)
                     ? (string) (($result['err'] ?? '') ?: ($result['text'] ?? 'Registrar API request failed'))
@@ -433,12 +664,48 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         } catch (Registrar_Exception $exception) {
             throw $exception;
         } catch (Throwable $exception) {
-            $registrar = $this->config['registrar'] === self::REGISTRAR_NAMECOM ? 'Name.com' : 'OpenSRS';
+            $registrar = self::PROVIDERS[$this->config['registrar']];
             $message = sprintf('Connect (%s) failed to %s: %s', $registrar, $operation, $exception->getMessage());
             $this->getLog()->error($message);
 
             $code = $exception->getCode();
             throw new Registrar_Exception($message, null, is_int($code) ? $code : 0);
         }
+    }
+}
+
+/**
+ * Keep the Cardo interface while correcting its current GoDaddy purchase and
+ * nameserver endpoints. Remove these overrides when Cardo provides them.
+ */
+class Registrar_Connect_GoDaddy extends GoDaddy
+{
+    public function registerDomain(string $domain, array $opts): array
+    {
+        $contacts = $opts['contacts'];
+        return $this->send('POST', '/domains/purchase', [
+            'domain' => $domain, 'period' => $opts['years'] ?? 1,
+            'consent' => ['agreedAt' => gmdate('c'), 'agreedBy' => $opts['client_ip'], 'agreementKeys' => ['DNRA']],
+            'contactRegistrant' => $contacts['registrant'], 'contactAdmin' => $contacts['admin'],
+            'contactTech' => $contacts['tech'], 'contactBilling' => $contacts['billing'],
+            'nameServers' => $opts['nameservers'] ?? [],
+            'privacy' => (bool) ($opts['privacy'] ?? false), 'renewAuto' => false,
+        ]);
+    }
+
+    public function setNameServers(string $domain, array $nameservers): array
+    {
+        return $this->send('PATCH', '/domains/' . rawurlencode($domain), ['nameServers' => array_values($nameservers)]);
+    }
+
+    private function send(string $method, string $path, array $payload): array
+    {
+        [$code, $body, $error] = Http::request($method, rtrim($this->creds['base'], '/') . $path, [
+            'headers' => ['Authorization' => 'sso-key ' . $this->creds['api_key'] . ':' . $this->creds['api_secret'], 'Accept' => 'application/json'],
+            'json' => $payload,
+        ]);
+        $raw = $body === '' ? [] : json_decode($body, true);
+        return ['ok' => $code >= 200 && $code < 300 && $error === '', 'http' => $code,
+            'raw' => is_array($raw) ? $raw : [], 'err' => $error ?: (string) ($raw['message'] ?? '')];
     }
 }
