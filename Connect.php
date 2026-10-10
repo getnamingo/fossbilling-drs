@@ -275,7 +275,7 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
                 + $this->createDynadotContacts($domain);
         }
 
-        $this->callApi(
+        $result = $this->callApi(
             'register ' . $domain->getName(),
             fn () => $this->config['registrar'] === 'dynadot'
                 ? $this->getRegistrarClient()->raw('register', $options)
@@ -284,12 +284,18 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
                     : $this->getRegistrarClient()->registerDomain($domain->getName(), $options)),
         );
 
-        // These Cardo registration methods do not send nameservers. The domain
+        // NameSilo 301 means the purchase completed with default nameservers.
+        // Other Cardo registration methods omit nameservers entirely. The domain
         // has already been purchased: never report a retryable registration
         // failure for a subsequent nameserver update.
-        if (in_array($this->config['registrar'], ['dynadot', 'namecheap'], true)
-            && $this->getNameservers($domain) !== []) {
+        $namesiloFallback = $this->config['registrar'] === 'namesilo'
+            && (int) ($result['raw']['reply']['code'] ?? 0) === 301;
+        if ($namesiloFallback || (in_array($this->config['registrar'], ['dynadot', 'namecheap'], true)
+            && $this->getNameservers($domain) !== [])) {
             try {
+                if ($this->getNameservers($domain) === []) {
+                    throw new Registrar_Exception('No requested nameservers are configured.');
+                }
                 $this->modifyNs($domain);
             } catch (Registrar_Exception $exception) {
                 $this->getLog()->error('Connect registered ' . $domain->getName()
