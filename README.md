@@ -8,10 +8,15 @@ A FOSSBilling registrar module for working with multiple domain registrars throu
 
 ## Registrar Support
 
-| Registrar | Status | Motes |
-|----------|----------|----------|
-| **Name.com** | beta | |
-| OpenSRS | alpha | |
+| Registrar | Status | Notes |
+|-----------|--------|-------|
+| **Name.com** | beta | Test and production environments. |
+| OpenSRS | alpha | Test and production environments. |
+| GoDaddy | alpha | Test and production environments. Requires API key, API secret and registration consent IP. |
+| NameSilo | alpha | Production only. |
+| Dynadot | alpha | Test and production environments. |
+| Namecheap | alpha | Test and production environments. Requires API user, API key and whitelisted server IPv4. |
+| OpusDNS | alpha | Test and production environments. |
 
 ## Installation
 
@@ -26,38 +31,6 @@ If this is not your first registrar module, you may skip copying the `namingo/` 
 4. Go to the **Registrars** tab in the admin panel and select your registrar module. Enter your registrar connection details.
 
 5. Add a new Top Level Domain (TLD) using your module from the "**New Top Level Domain**" tab. Make sure to configure all necessary details, such as pricing, within this tab.
-
-### Mandatory FOSSBilling Core Changes (FOSSBilling < 0.8.4)
-
-If you are using a **FOSSBilling version earlier than 0.8.4**, the following temporary core changes may be required due to bugs in older FOSSBilling releases. These workarounds are not required on **FOSSBilling 0.8.4 or later**.
-
-#### 1. Prevent Duplicate Domain Registration
-
-Edit `[FOSSBilling_path]/modules/Order/Service.php` and at the very beginning of the `activateOrder()` method, add:
-
-```php
-$order = $this->di['db']->load('ClientOrder', $order->id);
-
-if ($order->status === \Model_ClientOrder::STATUS_ACTIVE) {
-    return true;
-}
-```
-
-#### 2. Registrar Adapter Autoload Fix
-
-Edit `[FOSSBilling_path]/modules/Servicedomain/Service.php` and find:
-
-```php
-$class = sprintf('Registrar_Adapter_%s', $model->registrar);
-```
-
-Immediately after it, add:
-
-```php
-$file = Path::join(PATH_LIBRARY, 'Registrar', 'Adapter', "{$model->registrar}.php");
-
-require_once $file;
-```
 
 ## Upgrade
 
