@@ -20,13 +20,14 @@ jobs:
         with:
           php-version: "8.3"
           tools: composer:v2
+          extensions: simplexml
 
       - name: Composer install inside namingo
         run: |
           set -euxo pipefail
           mkdir -p namingo
           cd namingo
-          composer require namingo/registrars --no-interaction --no-progress
+          composer require namingo/cardo-drs --no-interaction --no-progress
 
       - name: Build archives (repo root, includes namingo/vendor)
         run: |
