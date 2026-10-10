@@ -27,7 +27,7 @@ namespace {
     class Registrar_Domain_Contact {
         public function __call(string $method, array $args): string {
             return ['getFirstName'=>'Ada', 'getLastName'=>'Lovelace', 'getEmail'=>'ada@example.test',
-                'getAddress1'=>'1 Test Street', 'getCity'=>'London', 'getCountry'=>'gb', 'getZip'=>'TEST',
+                'getAddress1'=>'1 Test Street', 'getCity'=>'London', 'getState'=>'London', 'getCountry'=>'gb', 'getZip'=>'TEST',
                 'getTel'=>'12345', 'getTelCc'=>'44', 'getCompany'=>'Test Ltd'][$method] ?? '';
         }
     }
@@ -138,19 +138,26 @@ namespace {
         };
         Http::$response = $success;
         Http::$requests = [];
+        if ($brand === 'godaddy') {
+            Http::$responses = [[200, '[{"agreementKey":"DNRA"},{"agreementKey":"TLD-SPECIAL"}]', ''], $success];
+        }
         if ($brand === 'dynadot') {
             Http::$responses = [[200, '{"CreateContactResponse":{"ResponseCode":0,"Status":"success","CreateContactContent":{"ContactId":"42"}}}', ''], $success, $success];
         }
         check($module->registerDomain($domain), $brand . ' registration');
-        $purchase = Http::$requests[$brand === 'dynadot' ? 1 : 0];
+        $purchase = Http::$requests[in_array($brand, ['dynadot', 'godaddy'], true) ? 1 : 0];
         if ($brand === 'godaddy') {
             check($purchase[2]['json']['contactRegistrant']['nameFirst'] === 'Ada', 'GoDaddy contact format');
             check($purchase[2]['json']['contactRegistrant']['addressMailing']['country'] === 'GB', 'GoDaddy address');
             check($purchase[2]['json']['consent']['agreedBy'] === '192.0.2.1', 'Consent IP');
+            check($purchase[2]['json']['consent']['agreementKeys'] === ['DNRA', 'TLD-SPECIAL'], 'TLD agreements forwarded');
+            check(Http::$requests[0][0] === 'GET' && !isset(Http::$requests[0][2]['json']), 'Agreement lookup has no JSON body');
             check($purchase[2]['json']['renewAuto'] === false, 'GoDaddy auto-renew disabled');
         }
         if ($brand === 'namesilo') {
-            check($purchase[2]['query']['rr_fn'] === 'Ada' && $purchase[2]['query']['rr_ad'] === '1 Test Street', 'NameSilo registrant mapping');
+            check($purchase[2]['query']['fn'] === 'Ada' && $purchase[2]['query']['ad'] === '1 Test Street', 'NameSilo registrant mapping');
+            check($purchase[2]['query']['ph'] === '12345', 'NameSilo subscriber phone');
+            check(!isset($purchase[2]['query']['rr_fn']), 'No incorrect rr prefix');
             check(request()[2]['query']['ns1'] === 'ns1.example.test', 'NameSilo nameserver parameters');
         }
         if ($brand === 'dynadot') {
@@ -202,15 +209,48 @@ namespace {
         try { $module->renewDomain($domain); } catch (Registrar_Exception $e) {}
         check(str_starts_with(request()[1], $endpoint), $brand . ' sandbox');
     }
-    $module = new Registrar_Adapter_Connect(['registrar'=>'namesilo', 'environment'=>'production', 'api_key'=>'key']);
+    $module = new Registrar_Adapter_Connect(['registrar'=>'namecheap', 'api_key'=>'key', 'api_user'=>'user', 'client_ip'=>'192.0.2.1']);
     Http::$requests = [];
-    Http::$responses = [[200, '{"reply":{"code":300}}', ''], [503, '{}', '']];
+    Http::$responses = [[200, '<ApiResponse Status="OK"><CommandResponse><DomainCreateResult Registered="true" /></CommandResponse></ApiResponse>', ''], [503, '{}', '']];
     check($module->registerDomain($domain), 'Completed purchase remains successful after nameserver failure');
     check(count(Http::$requests) === 2, 'One purchase and one nameserver attempt');
     $module = new Registrar_Adapter_Connect(['registrar'=>'godaddy', 'api_key'=>'key', 'api_secret'=>'secret', 'client_ip'=>'192.0.2.1', 'endpoint'=>'https://example.test/v1']);
-    Http::$response = [200, '{}', ''];
+    Http::$responses = [[200, '[{"agreementKey":"SPECIAL"}]', ''], [200, '{}', '']];
     check($module->registerDomain($domain), 'GoDaddy purchase');
     check(request()[1] === 'https://example.test/v1/domains/purchase', 'Endpoint override and correct purchase path');
+    $godaddy = new Registrar_Adapter_Connect(['registrar'=>'godaddy', 'api_key'=>'key', 'api_secret'=>'secret', 'client_ip'=>'192.0.2.1']);
+    foreach ([[403, '{}', ''], [0, '', 'Transport error'], [200, '[]', ''], [200, '[{"title":"No key"}]', ''], [200, 'not-json', '']] as $failure) {
+        Http::$requests = [];
+        Http::$response = $failure;
+        try { $godaddy->registerDomain($domain); throw new RuntimeException('Invalid agreements accepted'); }
+        catch (Registrar_Exception $e) {}
+        check(count(Http::$requests) === 1 && Http::$requests[0][0] === 'GET', 'No purchase after agreement lookup failure');
+    }
+    $compoundDomain = new class extends Registrar_Domain {
+        public function getName(): string { return 'example.co.uk'; }
+    };
+    Http::$requests = [];
+    Http::$responses = [[200, '[{"agreementKey":"COUK"}]', ''], [200, '{}', '']];
+    check($godaddy->registerDomain($compoundDomain), 'Compound TLD registration');
+    parse_str(parse_url(Http::$requests[0][1], PHP_URL_QUERY), $query);
+    check($query['tlds'] === 'co.uk' && $query['privacy'] === 'false', 'Compound TLD and privacy agreement parameters');
+
+    $namesilo = new Registrar_Adapter_Connect(['registrar'=>'namesilo', 'environment'=>'production', 'api_key'=>'key']);
+    $formatter = new ReflectionMethod($namesilo, 'formatProviderPhone');
+    foreach (['12345', '+44 12345', '+44.12345'] as $phone) {
+        $contact = new class($phone) extends Registrar_Domain_Contact {
+            public function __construct(private string $phone) {}
+            public function getTel(): string { return $this->phone; }
+        };
+        check($formatter->invoke($namesilo, $contact) === '12345', 'Local and international NameSilo phones');
+    }
+    Http::$requests = [];
+    Http::$response = [200, '{"reply":{"code":302,"detail":"Default contact used"}}', ''];
+    try { $namesilo->registerDomain($domain); throw new RuntimeException('Default contact fallback accepted'); }
+    catch (Registrar_Exception $e) {
+        check(str_contains($e->getMessage(), 'Do not retry registration'), 'Already purchased warning');
+    }
+    check(count(Http::$requests) === 1, 'No retry or follow-up after contact fallback');
     foreach ([
         ['registrar'=>'namesilo', 'api_key'=>'key'],
         ['registrar'=>'godaddy', 'api_key'=>'key'],
