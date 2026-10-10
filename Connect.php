@@ -267,6 +267,9 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     public function registerDomain(Registrar_Domain $domain): bool
     {
         $options = $this->registrationOptions($domain);
+        if ($this->config['registrar'] === 'namesilo') {
+            $options = $this->namesiloRegistrationParams($domain, $options);
+        }
         if ($this->config['registrar'] === 'dynadot') {
             $options = ['domain' => $domain->getName(), 'duration' => $this->getPeriod($domain)]
                 + $this->createDynadotContacts($domain);
@@ -276,13 +279,15 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
             'register ' . $domain->getName(),
             fn () => $this->config['registrar'] === 'dynadot'
                 ? $this->getRegistrarClient()->raw('register', $options)
-                : $this->getRegistrarClient()->registerDomain($domain->getName(), $options),
+                : ($this->config['registrar'] === 'namesilo'
+                    ? $this->getRegistrarClient()->raw('registerDomain', $options)
+                    : $this->getRegistrarClient()->registerDomain($domain->getName(), $options)),
         );
 
         // These Cardo registration methods do not send nameservers. The domain
         // has already been purchased: never report a retryable registration
         // failure for a subsequent nameserver update.
-        if (in_array($this->config['registrar'], ['namesilo', 'dynadot', 'namecheap'], true)
+        if (in_array($this->config['registrar'], ['dynadot', 'namecheap'], true)
             && $this->getNameservers($domain) !== []) {
             try {
                 $this->modifyNs($domain);
@@ -551,6 +556,22 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         return $params;
     }
 
+    private function namesiloRegistrationParams(Registrar_Domain $domain, array $options): array
+    {
+        $params = ['domain' => $domain->getName(), 'years' => $options['years'], 'auto_renew' => '0', 'private' => '1'];
+        $contact = $options['registrant'];
+        foreach (['fn' => 'first_name', 'ln' => 'last_name', 'ad' => 'address1', 'cy' => 'city',
+            'st' => 'state', 'zp' => 'postal_code', 'ct' => 'country', 'em' => 'email', 'ph' => 'phone'] as $field => $key) {
+            if (trim($contact[$key]) === '') {
+                throw new Registrar_Exception('NameSilo requires all registrant fields; missing ' . $key . '. Registration has not been submitted.');
+            }
+            $params[$field] = $contact[$key];
+        }
+        $params['cp'] = $contact['organization'];
+        $params['ad2'] = $contact['address2'];
+        return $params + $this->indexedNameservers($domain, 'ns', 1);
+    }
+
     private function normalizeDetails(array $result): array
     {
         $raw = $result['raw'] ?? [];
@@ -590,7 +611,10 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
         $raw = $result['raw'] ?? [];
         if ($this->config['registrar'] === 'namesilo') {
             $reply = $raw['reply'] ?? [];
-            if (!isset($reply['code']) || !in_array((int) $reply['code'], [300, 301, 302], true)) {
+            if ((int) ($reply['code'] ?? 0) === 302) {
+                throw new Registrar_Exception('NameSilo registered the domain using the account default contact instead of the supplied registrant. Do not retry registration; correct the contact in NameSilo and reconcile this order.');
+            }
+            if (!isset($reply['code']) || !in_array((int) $reply['code'], [300, 301], true)) {
                 throw new RuntimeException((string) ($reply['detail'] ?? 'Invalid NameSilo response'));
             }
         }
@@ -613,6 +637,16 @@ class Registrar_Adapter_Connect extends Registrar_AdapterAbstract
     {
         $phone = $this->formatPhone($contact);
         $code = preg_replace('/\D+/', '', (string) $contact->getTelCc());
+        if ($this->config['registrar'] === 'namesilo') {
+            $number = trim((string) $contact->getTel());
+            if (str_starts_with($number, '+')) {
+                if ($code === '' || !str_starts_with($phone, '+' . $code)) {
+                    throw new Registrar_Exception('NameSilo requires the telephone country code separately to format an international phone number.');
+                }
+                return substr($phone, strlen($code) + 1);
+            }
+            return (string) preg_replace('/\D+/', '', $number);
+        }
         if (in_array($this->config['registrar'], ['godaddy', 'namecheap'], true)
             && $code !== '' && str_starts_with($phone, '+' . $code)) {
             return '+' . $code . '.' . substr($phone, strlen($code) + 1);
@@ -683,9 +717,33 @@ class Registrar_Connect_GoDaddy extends GoDaddy
     public function registerDomain(string $domain, array $opts): array
     {
         $contacts = $opts['contacts'];
+        // Domain input is registrable (e.g. example.co.uk); remove only its
+        // first label so multi-label TLDs remain intact.
+        $tld = explode('.', $domain, 2)[1] ?? '';
+        if ($tld === '') {
+            throw new RuntimeException('GoDaddy registration requires a domain with a TLD.');
+        }
+        $privacy = (bool) ($opts['privacy'] ?? false);
+        $agreements = $this->send('GET', '/domains/agreements?' . http_build_query([
+            'tlds' => $tld, 'privacy' => $privacy ? 'true' : 'false', 'forTransfer' => 'false',
+        ]), []);
+        if (!$agreements['ok']) {
+            return $agreements;
+        }
+        $keys = [];
+        foreach ($agreements['raw'] as $agreement) {
+            if (!is_array($agreement) || !is_string($agreement['agreementKey'] ?? null)
+                || trim($agreement['agreementKey']) === '') {
+                throw new RuntimeException('GoDaddy returned invalid agreement data. Purchase has not been submitted.');
+            }
+            $keys[] = $agreement['agreementKey'];
+        }
+        if ($keys === []) {
+            throw new RuntimeException('GoDaddy returned no required agreements. Purchase has not been submitted.');
+        }
         return $this->send('POST', '/domains/purchase', [
             'domain' => $domain, 'period' => $opts['years'] ?? 1,
-            'consent' => ['agreedAt' => gmdate('c'), 'agreedBy' => $opts['client_ip'], 'agreementKeys' => ['DNRA']],
+            'consent' => ['agreedAt' => gmdate('c'), 'agreedBy' => $opts['client_ip'], 'agreementKeys' => array_values(array_unique($keys))],
             'contactRegistrant' => $contacts['registrant'], 'contactAdmin' => $contacts['admin'],
             'contactTech' => $contacts['tech'], 'contactBilling' => $contacts['billing'],
             'nameServers' => $opts['nameservers'] ?? [],
@@ -700,10 +758,13 @@ class Registrar_Connect_GoDaddy extends GoDaddy
 
     private function send(string $method, string $path, array $payload): array
     {
-        [$code, $body, $error] = Http::request($method, rtrim($this->creds['base'], '/') . $path, [
+        $options = [
             'headers' => ['Authorization' => 'sso-key ' . $this->creds['api_key'] . ':' . $this->creds['api_secret'], 'Accept' => 'application/json'],
-            'json' => $payload,
-        ]);
+        ];
+        if ($method !== 'GET') {
+            $options['json'] = $payload;
+        }
+        [$code, $body, $error] = Http::request($method, rtrim($this->creds['base'], '/') . $path, $options);
         $raw = $body === '' ? [] : json_decode($body, true);
         return ['ok' => $code >= 200 && $code < 300 && $error === '', 'http' => $code,
             'raw' => is_array($raw) ? $raw : [], 'err' => $error ?: (string) ($raw['message'] ?? '')];
